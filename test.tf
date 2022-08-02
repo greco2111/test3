@@ -1,207 +1,134 @@
-resource "aws_s3_bucket" "example" {
-  bucket = "example"
+variable "AWS_REGION" {
+  description = "AWS region.  Example: us-east-2"
 }
 
-resource "aws_s3_bucket_acl" "example" {
-  bucket = aws_s3_bucket.example.id
-  acl    = "private"
+variable "DEPLOYMENT_NAME" {
+  description = "Name of deployment - used for the cluster name.  Example: rotate"
 }
 
-resource "aws_iam_role" "example" {
-  name = "example"
-
-  assume_role_policy = <<EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "Service": "codebuild.amazonaws.com"
-      },
-      "Action": "sts:AssumeRole"
-    }
-  ]
-}
-EOF
+variable "LACEWORK_ACCESS_TOKEN" {
+  description = "Lace work Access Token"
 }
 
-resource "aws_iam_role_policy" "example" {
-  role = aws_iam_role.example.name
-
-  policy = <<POLICY
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Resource": [
-        "*"
-      ],
-      "Action": [
-        "logs:CreateLogGroup",
-        "logs:CreateLogStream",
-        "logs:PutLogEvents"
-      ]
-    },
-    {
-      "Effect": "Allow",
-      "Action": [
-        "ec2:CreateNetworkInterface",
-        "ec2:DescribeDhcpOptions",
-        "ec2:DescribeNetworkInterfaces",
-        "ec2:DeleteNetworkInterface",
-        "ec2:DescribeSubnets",
-        "ec2:DescribeSecurityGroups",
-        "ec2:DescribeVpcs"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": [
-        "ec2:CreateNetworkInterfacePermission"
-      ],
-      "Resource": [
-        "arn:aws:ec2:us-east-1:123456789012:network-interface/*"
-      ],
-      "Condition": {
-        "StringEquals": {
-          "ec2:Subnet": [
-            "${aws_subnet.example1.arn}",
-            "${aws_subnet.example2.arn}"
-          ],
-          "ec2:AuthorizedService": "codebuild.amazonaws.com"
-        }
-      }
-    },
-    {
-      "Effect": "Allow",
-      "Action": [
-        "s3:*"
-      ],
-      "Resource": [
-        "${aws_s3_bucket.example.arn}",
-        "${aws_s3_bucket.example.arn}/*"
-      ]
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = ">= 3.20.0"
     }
-  ]
-}
-POLICY
+
+    local = {
+      source  = "hashicorp/local"
+      version = "2.1.0"
+    }
+
+    null = {
+      source  = "hashicorp/null"
+      version = "3.1.0"
+    }
+  }
+  required_version = "> 0.14"
 }
 
-resource "aws_codebuild_project" "example" {
-  name          = "test-project"
-  description   = "test_codebuild_project"
-  build_timeout = "5"
-  service_role  = aws_iam_role.example.arn
+provider "aws" {
+  region = var.AWS_REGION
+}
 
-  artifacts {
-    type = "NO_ARTIFACTS"
-  }
+locals {
+  instance_name_a = "ec2-log4j-${var.DEPLOYMENT_NAME}a"
+  instance_name_b = "ec2-log4j-${var.DEPLOYMENT_NAME}b"
+  instance_name_t = "ec2-log4j-${var.DEPLOYMENT_NAME}-traffic"
+}
 
-  cache {
-    type     = "S3"
-    location = aws_s3_bucket.example.bucket
-  }
-
-  environment {
-    compute_type                = "BUILD_GENERAL1_SMALL"
-    image                       = "aws/codebuild/standard:1.0"
-    type                        = "LINUX_CONTAINER"
-    image_pull_credentials_type = "CODEBUILD"
-
-    environment_variable {
-      name  = "SOME_KEY1"
-      value = "SOME_VALUE1"
+data "aws_ami" "ubuntu" {
+    most_recent = true
+    filter {
+        name   = "name"
+        values = ["ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-*"]
     }
-
-    environment_variable {
-      name  = "SOME_KEY2"
-      value = "SOME_VALUE2"
-      type  = "PARAMETER_STORE"
+    filter {
+        name   = "virtualization-type"
+        values = ["hvm"]
     }
-  }
+    owners = ["099720109477"] # Canonical
+}
 
-  logs_config {
-    cloudwatch_logs {
-      group_name  = "log-group"
-      stream_name = "log-stream"
-    }
+resource "aws_security_group" "log4jsecuritygroup" {
+  name = "log4jsecuritygroup"
+  description = "Log4J security group"
+}
 
-    s3_logs {
-      status   = "ENABLED"
-      location = "${aws_s3_bucket.example.id}/build-log"
-    }
-  }
+resource "aws_security_group_rule" "log4j-private-port-ingress" {
+    type = "ingress"
+    from_port = 8080
+    to_port = 8080
+    protocol = "tcp"
+    cidr_blocks = ["${aws_instance.traffic.public_ip}/32"]
+    security_group_id = "${aws_security_group.log4jsecuritygroup.id}"
+}
 
-  source {
-    type            = "GITHUB"
-    location        = "https://github.com/mitchellh/packer.git"
-    git_clone_depth = 1
+resource "aws_security_group_rule" "log4j-private-port-ingress-ssh" {
+    type = "ingress"
+    from_port = 22
+    to_port = 22
+    protocol = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    security_group_id = "${aws_security_group.log4jsecuritygroup.id}"
+}
 
-    git_submodules_config {
-      fetch_submodules = true
-    }
-  }
+resource "aws_security_group_rule" "log4j-private-port-egress" {
+    type = "egress"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+    security_group_id = "${aws_security_group.log4jsecuritygroup.id}"
+}
 
-  source_version = "master"
-
-  vpc_config {
-    vpc_id = aws_vpc.example.id
-
-    subnets = [
-      aws_subnet.example1.id,
-      aws_subnet.example2.id,
-    ]
-
-    security_group_ids = [
-      aws_security_group.example1.id,
-      aws_security_group.example2.id,
-    ]
-  }
+resource "aws_instance" "log4jhosta" {
+  ami           = data.aws_ami.ubuntu.id
+  instance_type = "t2.micro"
+  key_name = "godev_us_west_1"
 
   tags = {
-    Environment = "Test"
+    Name = local.instance_name_a
   }
+  user_data = "${templatefile("./vm-setup-script.sh",
+                {
+                   "HOST_A_B"="A",
+                   "LACEWORK_ACCESS_TOKEN"=var.LACEWORK_ACCESS_TOKEN
+                }
+              )}"
+  vpc_security_group_ids = [aws_security_group.log4jsecuritygroup.id]
 }
 
-resource "aws_codebuild_project" "project-with-cache" {
-  name           = "test-project-cache"
-  description    = "test_codebuild_project_cache"
-  build_timeout  = "5"
-  queued_timeout = "5"
-
-  service_role = aws_iam_role.example.arn
-
-  artifacts {
-    type = "NO_ARTIFACTS"
-  }
-
-  cache {
-    type  = "LOCAL"
-    modes = ["LOCAL_DOCKER_LAYER_CACHE", "LOCAL_SOURCE_CACHE"]
-  }
-
-  environment {
-    compute_type                = "BUILD_GENERAL1_SMALL"
-    image                       = "aws/codebuild/standard:1.0"
-    type                        = "LINUX_CONTAINER"
-    image_pull_credentials_type = "CODEBUILD"
-
-    environment_variable {
-      name  = "SOME_KEY1"
-      value = "SOME_VALUE1"
-    }
-  }
-
-  source {
-    type            = "GITHUB"
-    location        = "https://github.com/mitchellh/packer.git"
-    git_clone_depth = 1
-  }
+resource "aws_instance" "log4jhostb" {
+  ami           = data.aws_ami.ubuntu.id
+  instance_type = "t2.small"
+  key_name = "godev_us_west_1"
 
   tags = {
-    Environment = "Test"
+    Name = local.instance_name_b
   }
+  user_data = "${templatefile("./vm-setup-script.sh",
+                {
+                   "HOST_A_B"="B",
+                   "LACEWORK_ACCESS_TOKEN"=var.LACEWORK_ACCESS_TOKEN
+                }
+              )}"
+  vpc_security_group_ids = [aws_security_group.log4jsecuritygroup.id]
+}
+
+resource "aws_instance" "traffic" {
+  ami           = data.aws_ami.ubuntu.id
+  instance_type = "t2.micro"
+  key_name = "godev_us_west_1"
+
+  tags = {
+    Name = local.instance_name_t
+  }
+  user_data = "${templatefile("./traffic-setup-script.sh",{
+                "IP_A"=aws_instance.log4jhosta.public_ip,
+                "IP_B"=aws_instance.log4jhostb.public_ip
+  })}"
 }
